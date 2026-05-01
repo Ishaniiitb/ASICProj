@@ -1,0 +1,256 @@
+# =============================================================================
+
+# ldpc_synthesis_mmmc_dual_lib.tcl
+
+#
+
+# Goal:
+
+# - Multi-library (HD + HDLL)
+
+# - MMMC setup (TT, SS, FF)
+
+# - Meet 200 MHz timing (5 ns)
+
+# - No power optimization (baseline)
+
+file mkdir ../reports/baseline
+file mkdir ../PnR
+
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+
+# STEP 0 : Setup search paths
+
+# -----------------------------------------------------------------------------
+
+#Before doing this check:- ls ../lib/**.lib -> should show all library files
+
+# Path where .lib files are stored
+
+#Structure it as /hd/all_tt_ff_ss_hd_files.lib and /hdll/all_tt_ff_ss_hdll_files.lib
+
+set_db init_lib_search_path ../lib/
+
+# Path where RTL files are stored
+
+set_db hdl_search_path ../rtl/
+
+# -----------------------------------------------------------------------------
+
+# STEP 1 : Create LIBRARY SETS (HD + HDLL per corner)
+
+# -----------------------------------------------------------------------------
+
+# A library set groups all .lib files corresponding to ONE PVT corner.
+
+# We include BOTH HD and HDLL so Genus can choose between them.
+
+# ---------- TT (Typical corner) ----------
+
+create_library_set -name lib_tt -timing {
+hd/sky130_fd_sc_hd__tt_025C_1v80.lib
+hdll/sky130_fd_sc_hdll__tt_025C_1v80.lib
+}
+
+# ---------- SS (Worst setup corner) ----------
+
+# High temperature + lower voltage → slowest devices
+
+create_library_set -name lib_ss -timing {
+hd/sky130_fd_sc_hd__ss_100C_1v44.lib
+hdll/sky130_fd_sc_hdll__ss_100C_1v44.lib
+}
+
+# ---------- FF (Worst hold / fastest corner) ----------
+
+# Low temperature + high voltage → fastest devices
+
+create_library_set -name lib_ff -timing {
+hd/sky130_fd_sc_hd__ff_n40C_1v95.lib
+hdll/sky130_fd_sc_hdll__ff_n40C_1v95.lib
+}
+
+# -----------------------------------------------------------------------------
+
+# STEP 2 : Define OPERATING CONDITIONS
+
+# -----------------------------------------------------------------------------
+
+# These define voltage and temperature corresponding to each corner.
+
+# Must match the .lib characterization.
+
+create_operating_conditions -name op_tt -process 1.0 -voltage 1.8  -temperature 25
+create_operating_conditions -name op_ss -process 1.0 -voltage 1.44 -temperature 100
+create_operating_conditions -name op_ff -process 1.0 -voltage 1.95 -temperature -40
+
+# -----------------------------------------------------------------------------
+
+# STEP 3 : Create ANALYSIS VIEWS
+
+# -----------------------------------------------------------------------------
+
+# Each view ties:
+
+# - a library set
+
+# - an operating condition
+
+create_analysis_view -name view_tt -library_set lib_tt -operating_conditions op_tt
+create_analysis_view -name view_ss -library_set lib_ss -operating_conditions op_ss
+create_analysis_view -name view_ff -library_set lib_ff -operating_conditions op_ff
+
+# -----------------------------------------------------------------------------
+
+# STEP 4 : Assign analysis views for timing checks
+
+# -----------------------------------------------------------------------------
+
+# Setup timing is worst at SS
+
+# Hold timing is worst at FF
+
+set_analysis_view -setup {view_ss} -hold {view_ff}
+
+init_design
+
+# -----------------------------------------------------------------------------
+
+# STEP 5 : Read RTL files
+
+# -----------------------------------------------------------------------------
+
+read_hdl ldpc_defines.vh
+
+read_hdl dual_port_rf.v
+read_hdl pipeline_reg.v
+read_hdl permutation_network.v
+read_hdl cn_update.v
+read_hdl vn_update.v
+read_hdl cn_vn_proc_unit.v
+read_hdl column_slice.v
+read_hdl global_ctrl.v
+read_hdl ldpc_decoder_top.v
+
+# -----------------------------------------------------------------------------
+
+# STEP 6 : Elaborate design
+
+# -----------------------------------------------------------------------------
+
+# Builds design hierarchy, resolves modules, applies parameters
+
+elaborate ldpc_decoder_top
+set_top_module ldpc_decoder_top
+
+# -----------------------------------------------------------------------------
+
+# STEP 7 : Read SDC constraints
+
+# -----------------------------------------------------------------------------
+
+# Your SDC should contain:
+
+# - create_clock (200 MHz → 5 ns)
+
+# - input/output delays
+
+# - any false/multicycle paths
+
+read_sdc ../constraints/ldpc_constraints.sdc
+
+report_clocks
+
+# -----------------------------------------------------------------------------
+
+# STEP 8 : Generic synthesis
+
+# -----------------------------------------------------------------------------
+
+# Technology-independent optimization:
+
+# - constant propagation
+
+# - Boolean simplification
+
+# - dead logic removal
+
+set_db syn_generic_effort high
+syn_generic
+
+# -----------------------------------------------------------------------------
+
+# STEP 9 : Technology mapping
+
+# -----------------------------------------------------------------------------
+
+# Maps generic logic to actual standard cells (HD + HDLL)
+
+syn_map
+
+#Tells if 200MHz is even feasible
+report_timing -max_paths 5
+
+# -----------------------------------------------------------------------------
+
+# STEP 10 : Pre-optimization reports
+
+# -----------------------------------------------------------------------------
+
+report_gates
+report_area   > ../reports/baseline/area_pre.txt
+report_timing > ../reports/baseline/timing_pre.txt
+report_power  > ../reports/baseline/power_pre.txt
+# -----------------------------------------------------------------------------
+
+# STEP 11 : Timing optimization
+
+# -----------------------------------------------------------------------------
+
+# Improves timing using:
+
+# - gate sizing
+
+# - buffering
+
+# - logic restructuring
+
+set_db syn_opt_effort high
+syn_opt
+
+# -----------------------------------------------------------------------------
+
+# STEP 12 : Final reports
+
+# -----------------------------------------------------------------------------
+
+report_gates
+report_area   > ../reports/baseline/area_post.txt
+report_timing > ../reports/baseline/timing_post.txt
+report_power  > ../reports/baseline/power_post.txt
+
+# Check for design issues (floating nets, etc.)
+
+check_design > ../reports/baseline/design_check.txt
+
+# -----------------------------------------------------------------------------
+
+# STEP 13 : Write outputs
+
+# -----------------------------------------------------------------------------
+
+# Gate-level netlist for PnR
+
+write_hdl > ../PnR/ldpc_netlist.v
+
+# Export constraints for PnR tools
+
+write_sdc > ../PnR/ldpc_constraints_out.sdc
+
+# -----------------------------------------------------------------------------
+
+# DONE
+
+# -----------------------------------------------------------------------------
